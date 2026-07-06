@@ -1,4 +1,5 @@
-const ENABLED_KEY = 'whd_enabled';
+const HOVER_ENABLED_KEY = 'whd_hover_enabled';
+const TRANSLATE_ENABLED_KEY = 'whd_translate_enabled';
 
 const ICONS = {
   on: {
@@ -15,34 +16,41 @@ const ICONS = {
   }
 };
 
-function updateIcon(enabled) {
-  chrome.action.setIcon({ path: enabled ? ICONS.on : ICONS.off });
+// 图标状态：两个功能只要有一个开着，就显示"开启"图标
+function updateIcon(hoverEnabled, translateEnabled) {
+  const anyOn = hoverEnabled || translateEnabled;
+  chrome.action.setIcon({ path: anyOn ? ICONS.on : ICONS.off });
   chrome.action.setTitle({
-    title: enabled ? '悬停查词（当前：开启，点击关闭）' : '悬停查词（当前：关闭，点击开启）'
+    title: '悬停查词 / 输入框翻译（点击图标打开设置面板）'
   });
 }
 
 function init() {
-  chrome.storage.local.get([ENABLED_KEY], (res) => {
-    // 默认关闭
-    const enabled = res[ENABLED_KEY] === true;
-    if (res[ENABLED_KEY] === undefined) {
-      chrome.storage.local.set({ [ENABLED_KEY]: false });
-    }
-    updateIcon(enabled);
+  chrome.storage.local.get([HOVER_ENABLED_KEY, TRANSLATE_ENABLED_KEY], (res) => {
+    const hoverEnabled = res[HOVER_ENABLED_KEY] === true;
+    const translateEnabled = res[TRANSLATE_ENABLED_KEY] === true;
+
+    // 默认都关闭
+    const updates = {};
+    if (res[HOVER_ENABLED_KEY] === undefined) updates[HOVER_ENABLED_KEY] = false;
+    if (res[TRANSLATE_ENABLED_KEY] === undefined) updates[TRANSLATE_ENABLED_KEY] = false;
+    if (Object.keys(updates).length > 0) chrome.storage.local.set(updates);
+
+    updateIcon(hoverEnabled, translateEnabled);
   });
 }
 
 chrome.runtime.onInstalled.addListener(init);
 chrome.runtime.onStartup.addListener(init);
 
-chrome.action.onClicked.addListener(() => {
-  chrome.storage.local.get([ENABLED_KEY], (res) => {
-    const current = res[ENABLED_KEY] === true;
-    const next = !current;
-    chrome.storage.local.set({ [ENABLED_KEY]: next }, () => {
-      updateIcon(next);
-    });
+// popup.js 里切换开关会写入 storage，这里统一监听并刷新图标
+// （manifest 里设置了 default_popup，所以不再需要 action.onClicked 逻辑）
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'local') return;
+  if (!(HOVER_ENABLED_KEY in changes) && !(TRANSLATE_ENABLED_KEY in changes)) return;
+
+  chrome.storage.local.get([HOVER_ENABLED_KEY, TRANSLATE_ENABLED_KEY], (res) => {
+    updateIcon(res[HOVER_ENABLED_KEY] === true, res[TRANSLATE_ENABLED_KEY] === true);
   });
 });
 
@@ -92,10 +100,38 @@ async function fetchYoudao(word) {
   return { word, ukphone, usphone, trs, example };
 }
 
+// ---------- 输入框整句翻译：用谷歌免费接口（client=gtx，无需 tk 校验，无需 Key） ----------
+// sl=auto 自动识别源语言，理论上任何谷歌翻译支持的语言都能作为输入
+async function googleTranslate(text, targetLang) {
+  const url =
+    `https://translate.googleapis.com/translate_a/single` +
+    `?client=gtx&sl=auto&tl=${encodeURIComponent(targetLang)}&dt=t&q=${encodeURIComponent(text)}`;
+
+  const res = await fetch(url, { referrerPolicy: 'no-referrer' });
+  if (!res.ok) throw new Error(`translate request failed: ${res.status}`);
+  
+
+  const json = await res.json();
+  // 返回结构形如 [[["译文块1","原文块1",...], ["译文块2","原文块2",...], ...], ...]
+  const chunks = json?.[0] || [];
+  const translated = chunks.map((chunk) => chunk?.[0] || '').join('');
+  return translated;
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message?.type !== 'WHD_LOOKUP') return false;
-  fetchYoudao(message.word)
-    .then((data) => sendResponse(data))
-    .catch((err) => sendResponse({ error: true, message: String(err) }));
-  return true; // 告知 Chrome 会异步调用 sendResponse
+  if (message?.type === 'WHD_LOOKUP') {
+    fetchYoudao(message.word)
+      .then((data) => sendResponse(data))
+      .catch((err) => sendResponse({ error: true, message: String(err) }));
+    return true; // 告知 Chrome 会异步调用 sendResponse
+  }
+
+  if (message?.type === 'WHD_TRANSLATE') {
+    googleTranslate(message.text, message.to)
+      .then((text) => sendResponse({ text }))
+      .catch((err) => sendResponse({ error: true, message: String(err) }));
+    return true;
+  }
+
+  return false;
 });

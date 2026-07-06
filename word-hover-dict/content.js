@@ -5,10 +5,13 @@
   const HIDE_DELAY = 10;
   const HIT_TOLERANCE = 4;
   const CACHE_PREFIX = 'wordhover_cache_';
-  const ENABLED_KEY = 'whd_enabled';
+  const HOVER_ENABLED_KEY = 'whd_hover_enabled';
+  const TRANSLATE_ENABLED_KEY = 'whd_translate_enabled';
   const HIGHLIGHT_NAME = 'whd-word';
 
-  let enabled = false;
+  let hoverEnabled = false;
+  let translateEnabled = false;
+
   let hoverTimer = null;
   let hideTimer = null;
   let lastWord = null;
@@ -35,18 +38,28 @@
     wordHighlight.clear();
   }
 
-  chrome.storage.local.get([ENABLED_KEY], (res) => {
-    enabled = res[ENABLED_KEY] === true;
+  chrome.storage.local.get([HOVER_ENABLED_KEY, TRANSLATE_ENABLED_KEY], (res) => {
+    hoverEnabled = res[HOVER_ENABLED_KEY] === true;
+    translateEnabled = res[TRANSLATE_ENABLED_KEY] === true;
   });
 
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === 'local' && changes[ENABLED_KEY]) {
-      enabled = changes[ENABLED_KEY].newValue === true;
-      if (!enabled) {
+    if (area !== 'local') return;
+
+    if (changes[HOVER_ENABLED_KEY]) {
+      hoverEnabled = changes[HOVER_ENABLED_KEY].newValue === true;
+      if (!hoverEnabled) {
         clearTimeout(hoverTimer);
         clearTimeout(hideTimer);
         clearWordHighlight();
         hideCard();
+      }
+    }
+
+    if (changes[TRANSLATE_ENABLED_KEY]) {
+      translateEnabled = changes[TRANSLATE_ENABLED_KEY].newValue === true;
+      if (!translateEnabled) {
+        resetSpaceState();
       }
     }
   });
@@ -248,7 +261,7 @@
     }, HIDE_DELAY);
   }
 
-  // ---------- 5. 事件绑定 ----------
+  // ---------- 5. 悬停查词事件绑定 ----------
   function handleMove(e) {
     const hit = getWordAtPoint(e.clientX, e.clientY);
 
@@ -278,7 +291,7 @@
   document.addEventListener(
     'mousemove',
     (e) => {
-      if (!enabled) return;
+      if (!hoverEnabled) return;
       lastEvent = e;
       if (!ticking) {
         ticking = true;
@@ -294,10 +307,196 @@
   document.addEventListener(
     'scroll',
     () => {
-      if (!enabled) return;
+      if (!hoverEnabled) return;
       clearWordHighlight();
       hideCard();
     },
     { passive: true, capture: true }
+  );
+
+  // ==================================================================
+  // 6. 输入框翻译：双击空格 -> 翻译成英文；⌘+J -> 翻译成日文
+  //    这个功能受 translateEnabled 独立开关控制，与悬停查词互不影响
+  // ==================================================================
+
+  // 双击判定窗口：故意调得比正常打字习惯里的两个空格更紧凑，
+  // 200ms 大概是"有意识快速点两下"和"自然打字节奏"之间比较可靠的分界线
+  const SPACE_RAPID_WINDOW = 200;
+
+  // 翻译中提示的滚动点动画
+  const DOT_FRAMES = ['...', '...', '...'];
+  const DOT_INTERVAL = 400;
+
+  const spaceState = {
+    el: null,
+    lastTime: 0
+  };
+
+  function resetSpaceState() {
+    spaceState.el = null;
+    spaceState.lastTime = 0;
+  }
+
+  function isEditableElement(el) {
+    if (!el) return false;
+    const tag = el.tagName;
+    if (tag === 'TEXTAREA') return true;
+    if (tag === 'INPUT') {
+      const type = (el.type || 'text').toLowerCase();
+      return ['text', 'search', 'url', 'tel', 'email', ''].includes(type);
+    }
+    if (el.isContentEditable) return true;
+    return false;
+  }
+
+  function getElementText(el) {
+    if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') return el.value;
+    return el.innerText;
+  }
+
+  // 纯写入内容，不处理光标（动画滚动期间频繁调用，输入框处于只读状态，不需要每次都摆弄光标）
+  function setText(el, text) {
+    if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+      el.value = text;
+    } else {
+      el.innerText = text;
+    }
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
+  function placeCaretAtEnd(el) {
+    if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+      try {
+        el.setSelectionRange(el.value.length, el.value.length);
+      } catch (e) {
+        // 部分 input type（如 email/number）不支持 setSelectionRange，忽略即可
+      }
+    } else {
+      const range = document.createRange();
+      const sel = window.getSelection();
+      range.selectNodeContents(el);
+      range.collapse(false);
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
+  }
+
+  // 翻译期间临时锁定输入框，防止动画滚动和用户继续打字互相打架
+  function setLocked(el, locked) {
+    if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+      el.readOnly = locked;
+    } else {
+      el.contentEditable = locked ? 'false' : 'true';
+    }
+  }
+
+  function requestGoogleTranslate(text, to) {
+    return new Promise((resolve) => {
+      chrome.runtime.sendMessage({ type: 'WHD_TRANSLATE', text, to }, (response) => {
+        if (chrome.runtime.lastError || !response) {
+          resolve({ error: true });
+          return;
+        }
+        resolve(response);
+      });
+    });
+  }
+
+  // 记录每个输入框"上一次翻译后的完整内容 + 目标语言"，用于判断这次触发时
+  // 输入框里哪部分是新增的、哪部分已经翻译过了（增量翻译）
+  const lastTranslatedMap = new WeakMap();
+
+  // 触发翻译时：
+  // - 如果当前内容 = 上次翻译结果 + 新增内容（且目标语言没变），只把新增部分发去翻译，
+  //   翻完后拼接在已翻译内容后面，避免把中英文混在一起整体重译造成语序错乱、语言误判
+  // - 否则（用户改了中间内容、清空重写、或切换了目标语言）视为全新的一次翻译，整体重译
+  async function triggerTranslate(el, targetLang) {
+    if (!el || el.dataset.whdTranslating === '1') return;
+
+    const raw = getElementText(el);
+    const current = raw.replace(/\s+$/, ''); // 去掉触发用的尾部空格
+    if (!current) return;
+
+    const prevRecord = lastTranslatedMap.get(el);
+
+    let toTranslate = current;
+    let prefix = '';
+    let isIncremental = false;
+
+    if (prevRecord && prevRecord.lang === targetLang && current.startsWith(prevRecord.text)) {
+      const delta = current.slice(prevRecord.text.length).trim();
+      if (!delta) return; // 跟上次翻译结果完全一样，没有新增内容，不用再翻一次
+      toTranslate = delta;
+      prefix = prevRecord.text + (/\s$/.test(prevRecord.text) ? '' : ' ');
+      isIncremental = true;
+    }
+
+    el.dataset.whdTranslating = '1';
+    setLocked(el, true);
+
+    let dotIndex = 0;
+    setText(el, current + DOT_FRAMES[dotIndex]);
+    const animTimer = setInterval(() => {
+      dotIndex = (dotIndex + 1) % DOT_FRAMES.length;
+      setText(el, current + DOT_FRAMES[dotIndex]);
+    }, DOT_INTERVAL);
+
+    const result = await requestGoogleTranslate(toTranslate, targetLang);
+
+    clearInterval(animTimer);
+    setLocked(el, false);
+    delete el.dataset.whdTranslating;
+
+    if (result.error || typeof result.text !== 'string' || !result.text) {
+      // 翻译失败，安静地恢复触发前的完整内容（增量或全量都一样，恢复到 current 即可）
+      setText(el, current);
+      placeCaretAtEnd(el);
+      return;
+    }
+
+    const finalText = isIncremental ? prefix + result.text : result.text;
+    setText(el, finalText);
+    lastTranslatedMap.set(el, { text: finalText, lang: targetLang });
+    placeCaretAtEnd(el);
+  }
+
+  document.addEventListener(
+    'keydown',
+    (e) => {
+      if (!translateEnabled) return;
+
+      const el = e.target;
+      if (!isEditableElement(el)) return;
+      if (el.dataset.whdTranslating === '1') return; // 翻译动画滚动中，忽略新的触发
+
+      // ⌘+J（Mac）触发翻译成日文
+      if (e.metaKey && (e.key === 'j' || e.key === 'J')) {
+        e.preventDefault();
+        resetSpaceState();
+        triggerTranslate(el, 'ja');
+        return;
+      }
+
+      const isSpace = e.code === 'Space' || e.key === ' ';
+      if (!isSpace) {
+        resetSpaceState();
+        return;
+      }
+
+      const now = Date.now();
+
+      // 不是同一个输入框，或距离上次空格太久 -> 视为普通打字的第一个空格，正常插入
+      if (el !== spaceState.el || now - spaceState.lastTime > SPACE_RAPID_WINDOW) {
+        spaceState.el = el;
+        spaceState.lastTime = now;
+        return;
+      }
+
+      // 200ms 内的第二次空格：判定为双击，拦截这一下并立即触发翻译
+      e.preventDefault();
+      resetSpaceState();
+      triggerTranslate(el, 'en');
+    },
+    true // capture 阶段拦截，确保能在页面自身逻辑之前 preventDefault
   );
 })();

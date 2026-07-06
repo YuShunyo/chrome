@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<style>
+  body {
+    width: 260px;
+    margin: 0;
+    padding: 16px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: #1f2328;
+  }
+  h1 {
+    font-size: 14px;
+    margin: 0 0 10px;
+    font-weight: 600;
+  }
+  .row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 0;
+  }
+  .row + .row {
+    border-top: 1px solid #eee;
+  }
+  .label-main {
+    font-size: 13.5px;
+    font-weight: 500;
+  }
+  .label-desc {
+    font-size: 11px;
+    color: #9ca3af;
+    margin-top: 2px;
+    line-height: 1.4;
+  }
+  .switch {
+    position: relative;
+    width: 38px;
+    height: 22px;
+    flex-shrink: 0;
+  }
+  .switch input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+  }
+  .slider {
+    position: absolute;
+    inset: 0;
+    background: #d1d5db;
+    border-radius: 22px;
+    cursor: pointer;
+    transition: background-color 0.2s;
+  }
+  .slider::before {
+    content: "";
+    position: absolute;
+    width: 16px;
+    height: 16px;
+    left: 3px;
+    top: 3px;
+    background: #fff;
+    border-radius: 50%;
+    transition: transform 0.2s;
+  }
+  input:checked + .slider {
+    background: #22c55e;
+  }
+  input:checked + .slider::before {
+    transform: translateX(16px);
+  }
+</style>
+</head>
+<body>
+  <h1>悬停查词 / 输入框翻译</h1>
+
+  <div class="row">
+    <div>
+      <div class="label-main">🖱️ 悬停查词</div>
+      <div class="label-desc">鼠标悬停在英文单词上弹出中英释义</div>
+    </div>
+    <label class="switch">
+      <input type="checkbox" id="hoverToggle" />
+      <span class="slider"></span>
+    </label>
+  </div>
+
+  <div class="row">
+    <div>
+      <div class="label-main">⌨️ 输入框翻译</div>
+      <div class="label-desc">连按2次空格→英文；⌘+J→日文</div>
+    </div>
+    <label class="switch">
+      <input type="checkbox" id="translateToggle" />
+      <span class="slider"></span>
+    </label>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

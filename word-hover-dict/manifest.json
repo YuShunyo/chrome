@@ -1,23 +1,25 @@
 {
   "manifest_version": 3,
-  "name": "悬停查词 Word Hover Dictionary",
-  "version": "1.2",
-  "description": "鼠标悬停在英文单词上自动弹出中英文释义，点击图标可开关（默认关闭）",
+  "name": "悬停查词",
+  "version": "1.3",
+  "description": "鼠标悬停在英文单词上自动弹出中英文释义；输入框内连按2次空格翻译成英文，⌘+J翻译成日文；两个功能可在弹出面板中独立开关",
   "permissions": ["storage"],
   "host_permissions": [
-    "https://dict.youdao.com/*"
+    "https://dict.youdao.com/*",
+    "https://translate.googleapis.com/*"
   ],
   "background": {
     "service_worker": "background.js"
   },
   "action": {
+    "default_popup": "popup.html",
     "default_icon": {
       "16": "icons/off/icon16.png",
       "32": "icons/off/icon32.png",
       "48": "icons/off/icon48.png",
       "128": "icons/off/icon128.png"
     },
-    "default_title": "悬停查词（当前：关闭，点击开启）"
+    "default_title": "悬停查词"
   },
   "icons": {
     "16": "icons/off/icon16.png",
